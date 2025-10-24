@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.stream.Stream;
 
 /**
@@ -61,7 +62,8 @@ public record PlanetilerConfig(
   Path tileWeights,
   double maxPointBuffer,
   boolean logJtsExceptions,
-  int featureSourceIdMultiplier
+  int featureSourceIdMultiplier,
+  List<String> extraNameTags
 ) {
 
   public static final int MIN_MINZOOM = 0;
@@ -125,6 +127,8 @@ public record PlanetilerConfig(
       arguments.getInteger("render_maxzoom", "maximum rendering zoom level up to " + MAX_MAXZOOM,
         Math.max(maxzoom, DEFAULT_MAXZOOM));
     Path tmpDir = arguments.file("tmpdir|tmp", "temp directory", Path.of("data", "tmp"));
+    List<String> extraNameTags = arguments.getList("extra_name_tags", "Extra name tags to copy from OSM to output",
+      List.of());
 
     return new PlanetilerConfig(
       arguments,
@@ -168,7 +172,7 @@ public record PlanetilerConfig(
       arguments.getString("http_user_agent", "User-Agent header to set when downloading files over HTTP",
         "Planetiler downloader (https://github.com/onthegomap/planetiler)"),
       arguments.getDuration("http_timeout", "Timeout to use when downloading files over HTTP", "30s"),
-      arguments.getInteger("http_retries", "Retries to use when downloading files over HTTP", 1),
+      arguments.getInteger("http_retries", "Retries to use when downloading files over HTTP", 5),
       arguments.getDuration("http_retry_wait", "How long to wait before retrying HTTP request", "5s"),
       arguments.getLong("download_chunk_size_mb", "Size of file chunks to download in parallel in megabytes", 100),
       arguments.getInteger("download_threads", "Number of parallel threads to use when downloading each file", 1),
@@ -218,7 +222,8 @@ public record PlanetilerConfig(
       arguments.getInteger("feature_source_id_multiplier",
         "Set vector tile feature IDs to (featureId * thisValue) + sourceId " +
           "where sourceId is 1 for OSM nodes, 2 for ways, 3 for relations, and 0 for other sources. Set to false to disable.",
-        10)
+        10),
+      extraNameTags
     );
   }
 

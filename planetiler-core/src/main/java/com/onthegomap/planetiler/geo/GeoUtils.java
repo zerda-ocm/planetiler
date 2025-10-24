@@ -5,7 +5,14 @@ import com.onthegomap.planetiler.config.PlanetilerConfig;
 import com.onthegomap.planetiler.stats.Stats;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import org.geotools.api.referencing.FactoryException;
+import org.geotools.api.referencing.crs.CoordinateReferenceSystem;
+import org.geotools.api.referencing.operation.MathTransform;
+import org.geotools.referencing.CRS;
+import org.geotools.referencing.operation.transform.AffineTransform2D;
+import org.geotools.referencing.operation.transform.ConcatenatedTransform;
 import org.locationtech.jts.algorithm.Area;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.CoordinateSequence;
@@ -661,6 +668,29 @@ public class GeoUtils {
     };
   }
 
+
+  /** Create a transform that swaps the X/Y coordinates. */
+  public static MathTransform swapXYTransform() {
+    return new AffineTransform2D(0, 1, 1, 0, 0, 0);
+  }
+
+  /**
+   * Creates a transform that maps coordinates from {@code source} to {@code dest} CRS. If {@code source} axis ordering
+   * does not match {@code longitudeFirst} then it force-swaps x/y coordinates first.
+   */
+  public static MathTransform findMathTransform(CoordinateReferenceSystem source, CoordinateReferenceSystem dest,
+    Boolean forceLongitudeFirst)
+    throws FactoryException {
+    var mathTransform = CRS.findMathTransform(source, dest, true);
+    if (forceLongitudeFirst != null) {
+      boolean sourceLonFirst = CRS.getAxisOrder(source) == CRS.AxisOrder.EAST_NORTH;
+      if (sourceLonFirst != forceLongitudeFirst) {
+        mathTransform = ConcatenatedTransform.create(swapXYTransform(), mathTransform);
+      }
+    }
+    return mathTransform;
+  }
+
   /** Helper class to sort polygons by area of their outer shell. */
   private record PolyAndArea(Polygon poly, double area) implements Comparable<PolyAndArea> {
 
@@ -672,5 +702,42 @@ public class GeoUtils {
     public int compareTo(PolyAndArea o) {
       return -Double.compare(area, o.area);
     }
+  }
+
+  public static String envelopeToString(Envelope envelope) {
+    return envelope == null ? "null" :
+      ("Envelope(" + envelope.getMinX() + ',' + envelope.getMinY() + ',' + envelope.getMaxX() + ',' +
+        envelope.getMaxY() + ')');
+  }
+
+  private static final Pattern COORDINATE_ORDER_SUFFIX = Pattern.compile(":(lat|lon)_first$");
+
+  /**
+   * Decodes a {@link CoordinateReferenceSystem} from an {@code EPSG:1234} code or WKT. Add {@code :lon_first} code to
+   * the suffixt to indicate the source coordinates are lon, lat and not lat, lon. lon_first defaults to the value from
+   * {@code base} if specified;
+   */
+  public static CoordinateReferenceSystem decodeCRS(String crs, CoordinateReferenceSystem base)
+    throws FactoryException {
+    try {
+      boolean longitudeFirst = base != null && CRS.getAxisOrder(base) == CRS.AxisOrder.EAST_NORTH;
+      var matcher = COORDINATE_ORDER_SUFFIX.matcher(crs);
+      if (matcher.find()) {
+        longitudeFirst = "lon".equals(matcher.group(1));
+        crs = matcher.replaceFirst("");
+      }
+      return CRS.decode(crs, longitudeFirst);
+    } catch (FactoryException e) {
+      return CRS.parseWKT(crs);
+    }
+  }
+
+  /**
+   * Decodes a {@link CoordinateReferenceSystem} from an {@code EPSG:1234} code or WKT. Add {@code :lon_first} code to
+   * the suffixt to indicate the source coordinates are lon, lat and not lat, lon.
+   */
+  public static CoordinateReferenceSystem decodeCRS(String crs)
+    throws FactoryException {
+    return decodeCRS(crs, null);
   }
 }

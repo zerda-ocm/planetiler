@@ -5,6 +5,7 @@ import static com.onthegomap.planetiler.expression.Expression.not;
 
 import com.onthegomap.planetiler.FeatureCollector;
 import com.onthegomap.planetiler.FeatureCollector.Feature;
+import com.onthegomap.planetiler.custommap.configschema.FeatureLayer;
 import com.onthegomap.planetiler.custommap.configschema.AttributeDefinition;
 import com.onthegomap.planetiler.custommap.configschema.FeatureGeometry;
 import com.onthegomap.planetiler.custommap.configschema.FeatureItem;
@@ -20,6 +21,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
+import java.util.function.ObjDoubleConsumer;
 
 /**
  * A map feature, configured from a YML configuration file.
@@ -40,7 +42,7 @@ public class ConfiguredFeature {
   private ScriptEnvironment<Contexts.FeaturePostMatch> featurePostMatchContext;
 
 
-  public ConfiguredFeature(String layer, TagValueProducer tagValueProducer, FeatureItem feature,
+  public ConfiguredFeature(FeatureLayer layer, TagValueProducer tagValueProducer, FeatureItem feature,
     Contexts.Root rootContext) {
     sources = Set.copyOf(feature.source());
 
@@ -81,7 +83,7 @@ public class ConfiguredFeature {
     tagTest = filter;
 
     //Factory to generate the right feature type from FeatureCollector
-    geometryFactory = geometryType.newGeometryFactory(layer);
+    geometryFactory = geometryType.newGeometryFactory(layer.id());
 
     //Configure logic for each attribute in the output tile
     List<BiConsumer<Contexts.FeaturePostMatch, Feature>> processors = new ArrayList<>();
@@ -90,9 +92,57 @@ public class ConfiguredFeature {
     }
     processors.add(makeFeatureProcessor(feature.minZoom(), Integer.class, Feature::setMinZoom));
     processors.add(makeFeatureProcessor(feature.maxZoom(), Integer.class, Feature::setMaxZoom));
-    processors.add(makeFeatureProcessor(feature.minSize(), Double.class, Feature::setMinPixelSize));
+
+    addPostProcessingImplications(layer, feature, processors, rootContext);
+    
+    // per-feature tolerance settings should take precedence over defaults from post-processing config
+    processors.add(makeFeatureProcessor(feature.tolerance(), Double.class, Feature::setPixelTolerance));
+    processors.add(makeFeatureProcessor(feature.toleranceAtMaxZoom(), Double.class, Feature::setPixelToleranceAtMaxZoom));
 
     featureProcessors = processors.stream().filter(Objects::nonNull).toList();
+  }
+
+  /** Consider implications of Post Processing on the feature's processors **/
+  private void addPostProcessingImplications(FeatureLayer layer, FeatureItem feature,
+    List<BiConsumer<Contexts.FeaturePostMatch, Feature>> processors,
+    Contexts.Root rootContext) {
+    var postProcess = layer.postProcess();
+
+    // Consider min_size and min_size_at_max_zoom
+    if (postProcess == null) {
+      processors.add(makeFeatureProcessor(feature.minSize(), Double.class, Feature::setMinPixelSize));
+      processors.add(makeFeatureProcessor(feature.minSizeAtMaxZoom(), Double.class, Feature::setMinPixelSizeAtMaxZoom));
+      return;
+    }
+    // In order for Post-processing to receive all features, the default MinPixelSize* are zero when features are collected
+    processors.add(makeFeatureProcessor(Objects.requireNonNullElse(feature.minSize(),0), Double.class, Feature::setMinPixelSize));
+    processors.add(makeFeatureProcessor(Objects.requireNonNullElse(feature.minSizeAtMaxZoom(),0), Double.class, Feature::setMinPixelSizeAtMaxZoom));
+    // Implications of tile_post_process.merge_line_strings
+    var mergeLineStrings = postProcess.mergeLineStrings();
+    if (mergeLineStrings != null) {
+      processors.add(makeLineFeatureProcessor(mergeLineStrings.tolerance(),Feature::setPixelTolerance));
+      processors.add(makeLineFeatureProcessor(mergeLineStrings.toleranceAtMaxZoom(),Feature::setPixelToleranceAtMaxZoom));
+      // postProcess.mergeLineStrings.minLength* and postProcess.mergeLineStrings.buffer
+      var bufferPixels = maxIgnoringNulls(mergeLineStrings.minLength(), mergeLineStrings.buffer());
+      var bufferPixelsAtMaxZoom = maxIgnoringNulls(mergeLineStrings.minLengthAtMaxZoom(), mergeLineStrings.buffer());
+      int maxZoom = rootContext.config().maxzoomForRendering();
+      if (bufferPixels != null || bufferPixelsAtMaxZoom != null) {
+        processors.add((context, f) -> {
+          if (f.isLine()) {
+            f.setBufferPixelOverrides(z -> z == maxZoom ? bufferPixelsAtMaxZoom : bufferPixels);
+          }
+        });
+      }
+
+    }
+    // Implications of tile_post_process.merge_polygons
+    var mergePolygons = postProcess.mergePolygons();
+    if (mergePolygons != null) {
+      // postProcess.mergePolygons.tolerance*
+      processors.add(makePolygonFeatureProcessor(mergePolygons.tolerance(),Feature::setPixelTolerance));
+      processors.add(makePolygonFeatureProcessor(mergePolygons.toleranceAtMaxZoom(),Feature::setPixelToleranceAtMaxZoom));
+      // TODO: postProcess.mergeLineStrings.minArea*
+    }
   }
 
   private <T> BiConsumer<Contexts.FeaturePostMatch, Feature> makeFeatureProcessor(Object input, Class<T> clazz,
@@ -113,6 +163,30 @@ public class ConfiguredFeature {
       var result = expression.apply(context);
       if (result != null) {
         consumer.accept(feature, result);
+      }
+    };
+  }
+
+  private BiConsumer<Contexts.FeaturePostMatch, Feature> makeLineFeatureProcessor(Double input,
+    ObjDoubleConsumer<Feature> consumer) {
+    if (input == null) {
+      return null;
+    }
+    return (context, feature) -> {
+      if (feature.isLine()) {
+        consumer.accept(feature, input);
+      }
+    };
+  }
+
+  private BiConsumer<Contexts.FeaturePostMatch, Feature> makePolygonFeatureProcessor(Double input,
+    ObjDoubleConsumer<Feature> consumer) {
+    if (input == null) {
+      return null;
+    }
+    return (context, feature) -> {
+      if (feature.isPolygon()) {
+        consumer.accept(feature, input);
       }
     };
   }
@@ -286,5 +360,11 @@ public class ConfiguredFeature {
     for (var processor : featureProcessors) {
       processor.accept(context, f);
     }
+  }
+
+  private Double maxIgnoringNulls(Double a, Double b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return Double.max(a, b);
   }
 }
